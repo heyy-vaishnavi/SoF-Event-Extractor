@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SoF Event Extractor — Laytime Intelligence</title>
+  <style>
+    :root{
+      --bg:#f6f8fb; --card:#ffffff; --muted:#6b7280; --accent:#0f172a;
+      --primary:#0b5fff; --ok:#10b981; --danger:#ef4444;
+      --shadow: 0 6px 18px rgba(12, 16, 24, 0.08);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    }
+    html,body{height:100%;background:var(--bg);margin:0;color:var(--accent)}
+    .container{max-width:980px;margin:36px auto;padding:20px}
+    .card{background:var(--card);border-radius:12px;padding:18px;box-shadow:var(--shadow);margin-bottom:16px}
+    header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+    header h1{font-size:20px;margin:0}
+    header p{margin:0;color:var(--muted);font-size:13px}
+    .uploader{display:grid;grid-template-columns:1fr 220px;gap:16px;align-items:center}
+    .drop{
+      border:2px dashed #e6e9ef;border-radius:10px;padding:28px;text-align:center;background:linear-gradient(180deg, rgba(11,95,255,0.02), transparent);
+      cursor:pointer; transition:200ms; color:var(--muted);
+    }
+    .drop.drag{border-color:var(--primary); box-shadow:0 8px 30px rgba(11,95,255,0.06)}
+    .drop small{display:block;margin-top:6px;color:var(--muted)}
+    .controls{display:flex;flex-direction:column;gap:10px}
+    .btn{display:inline-block;padding:10px 14px;border-radius:8px;border:0;background:var(--primary);color:white;cursor:pointer;}
+    .btn.secondary{background:transparent;border:1px solid #dbe5ff;color:var(--primary)}
+    .meta{font-size:13px;color:var(--muted);margin-top:8px}
+    .progress{height:8px;background:#eef3ff;border-radius:999px;overflow:hidden}
+    .progress > i{display:block;height:100%;background:linear-gradient(90deg,var(--primary),#60a5fa);width:0%}
+    .result-grid{display:grid;grid-template-columns: 1fr 360px; gap:16px}
+    .preview{white-space:pre-wrap; background:#fbfdff;border-radius:8px;padding:12px;min-height:220px;overflow:auto;border:1px solid #eef2ff}
+    .events-table{width:100%;border-collapse:collapse}
+    .events-table th,.events-table td{padding:8px;border-bottom:1px solid #f1f5f9;font-size:13px;text-align:left}
+    .small{font-size:13px;color:var(--muted)}
+    .links{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+    .link-btn{padding:8px 10px;border-radius:8px;border:1px solid #e6eefc;background:#fff;display:flex;justify-content:space-between;align-items:center}
+    .status{display:inline-block;padding:6px 10px;border-radius:999px;font-size:13px}
+    .status.idle{background:#fff;color:var(--muted);border:1px solid #eef2ff}
+    .status.running{background:linear-gradient(90deg,var(--primary),#60a5fa);color:white}
+    footer{margin-top:12px;font-size:13px;color:var(--muted);text-align:center}
+    @media (max-width:880px){ .uploader{grid-template-columns:1fr} .result-grid{grid-template-columns:1fr} }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <header>
+        <div>
+          <h1>SoF Event Extractor — Laytime Intelligence</h1>
+          <p>Upload Statement of Facts (PDF / DOCX). Azure OCR will be used as backend fallback. Output: JSON or CSV.</p>
+        </div>
+        <div style="text-align:right">
+          <div id="api-status" class="status idle">idle</div>
+          <div class="small" style="margin-top:8px">Backend: <span id="backend-url">http://127.0.0.1:8000</span></div>
+        </div>
+      </header>
+    </div>
+
+    <div class="card uploader">
+      <div id="dropzone" class="drop">
+        <strong id="drop-title">Click or drag a SoF file here</strong>
+        <div class="small" style="margin-top:8px">Supported: .pdf .docx .doc</div>
+        <small id="drop-sub">Or click to select from disk</small>
+        <input id="file-input" type="file" accept=".pdf,.docx,.doc" style="display:none" />
+        <div class="meta" id="file-meta" style="display:none"></div>
+      </div>
+
+      <div class="controls">
+        <div style="display:flex;gap:8px">
+          <button class="btn" id="upload-btn" disabled>Upload & Extract</button>
+          <button class="btn secondary" id="clear-btn">Clear</button>
+        </div>
+        <div class="meta">Progress</div>
+        <div class="progress"><i id="progress-bar"></i></div>
+        <div class="meta">Select output: <strong>Both JSON & CSV provided by the backend</strong></div>
+        <div class="small">Tip: Start backend (uvicorn server:app --reload --port 8000) and keep this page open.</div>
+      </div>
+    </div>
+
+    <div class="card result-grid">
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <h3 style="margin:0">Extraction Preview</h3>
+          <div class="small">Events found: <strong id="events-count">0</strong></div>
+        </div>
+        <div id="preview" class="preview small">No file processed yet.</div>
+      </div>
+
+      <aside>
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <h4 style="margin:0">Download</h4>
+          <div class="small">Click to fetch the saved files</div>
+        </div>
+
+        <div class="links" id="download-links">
+          <div style="color:var(--muted)">No outputs yet.</div>
+        </div>
+
+        <hr style="margin:14px 0">
+
+        <div>
+          <h4 style="margin:0">Events</h4>
+          <div class="small" style="margin-top:6px">Extracted events will show as a table here.</div>
+        </div>
+
+        <div style="margin-top:10px;overflow:auto;max-height:300px">
+          <table class="events-table" id="events-table">
+            <thead><tr><th>Event</th><th>Start</th><th>End</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </aside>
+    </div>
+
+    <div class="card small">
+      <strong>Notes:</strong>
+      <ul>
+        <li>Backend must run at <code>http://127.0.0.1:8000</code>. Update <code>API_BASE</code> below if different.</li>
+        <li>UI posts to <code>/upload</code> and uses returned links to provide JSON/CSV downloads.</li>
+      </ul>
+    </div>
+
+    <footer class="small">SoF Event Extractor — Laytime Intelligence</footer>
+  </div>
+
+  <script>
+    // ===================
+    // Configuration
+    // ===================
+    const API_BASE = "http://127.0.0.1:8000";
+    const UPLOAD_ENDPOINT = API_BASE + "/upload";
+    const BACKEND_HEALTH = API_BASE + "/docs";
+
+    // ===================
+    // UI elements
+    // ===================
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('file-input');
+    const uploadBtn = document.getElementById('upload-btn');
+    const clearBtn = document.getElementById('clear-btn');
+    const progressBar = document.getElementById('progress-bar');
+    const fileMeta = document.getElementById('file-meta');
+    const preview = document.getElementById('preview');
+    const eventsCount = document.getElementById('events-count');
+    const eventsTableBody = document.querySelector('#events-table tbody');
+    const downloadLinks = document.getElementById('download-links');
+    const apiStatus = document.getElementById('api-status');
+    const backendUrlLabel = document.getElementById('backend-url');
+
+    backendUrlLabel.textContent = API_BASE;
+    let selectedFile = null;
+
+    function setStatus(state){
+      apiStatus.className = 'status ' + (state === 'running' ? 'running' : (state === 'idle' ? 'idle' : ''));
+      apiStatus.textContent = state;
+    }
+    function setProgress(percent){
+      progressBar.style.width = Math.max(0, Math.min(100, percent)) + '%';
+    }
+    function resetUI(){
+      selectedFile = null;
+      fileMeta.style.display = 'none';
+      fileMeta.textContent = '';
+      uploadBtn.disabled = true;
+      preview.textContent = "No file processed yet.";
+      eventsCount.textContent = "0";
+      eventsTableBody.innerHTML = "";
+      downloadLinks.innerHTML = `<div style="color:var(--muted)">No outputs yet.</div>`;
+      setProgress(0);
+    }
+
+    // ---------- MINIMAL FIX START ----------
+    function renderEvents(events){
+      eventsTableBody.innerHTML = "";
+      if(!events || !events.length) return;
+      events.forEach(ev=>{
+        const tr = document.createElement('tr');
+        const eTd = document.createElement('td'); eTd.textContent = ev.event || "";
+        const sTd = document.createElement('td'); sTd.textContent = ev.start || "";   // <-- use start
+        const enTd = document.createElement('td'); enTd.textContent = ev.end || "";   // <-- use end
+        tr.appendChild(eTd); tr.appendChild(sTd); tr.appendChild(enTd);
+        eventsTableBody.appendChild(tr);
+      });
+    }
+    // ---------- MINIMAL FIX END ----------
+
+    // Drag & drop + file input
+    dropzone.addEventListener('click', ()=> fileInput.click());
+    dropzone.addEventListener('dragover', (e)=>{ e.preventDefault(); dropzone.classList.add('drag'); });
+    dropzone.addEventListener('dragleave', ()=>{ dropzone.classList.remove('drag'); });
+    dropzone.addEventListener('drop', (e)=>{
+      e.preventDefault(); dropzone.classList.remove('drag');
+      const files = e.dataTransfer.files;
+      if(files && files.length) handleFile(files[0]);
+    });
+    fileInput.addEventListener('change', (e)=>{ if(e.target.files && e.target.files[0]) handleFile(e.target.files[0]); });
+    clearBtn.addEventListener('click', resetUI);
+
+    function handleFile(file){
+      const ext = (file.name || '').toLowerCase();
+      if(!ext.endsWith('.pdf') && !ext.endsWith('.docx') && !ext.endsWith('.doc')){
+        alert("Unsupported file type. Please upload .pdf, .docx or .doc");
+        return;
+      }
+      selectedFile = file;
+      fileMeta.style.display = 'block';
+      fileMeta.textContent = `Selected: ${file.name} — ${Math.round(file.size/1024)} KB`;
+      uploadBtn.disabled = false;
+    }
+
+    // Upload & extract
+    uploadBtn.addEventListener('click', async () => {
+      if(!selectedFile) return alert("Select a file first.");
+      uploadBtn.disabled = true;
+      setStatus('running');
+      setProgress(5);
+      preview.textContent = "Uploading file and requesting extraction...";
+      downloadLinks.innerHTML = `<div style="color:var(--muted)">Processing...</div>`;
+      eventsTableBody.innerHTML = "";
+
+      try{
+        const form = new FormData();
+        form.append('file', selectedFile, selectedFile.name);
+        const resp = await fetch(UPLOAD_ENDPOINT, { method: 'POST', body: form });
+
+        if(!resp.ok){
+          const txt = await resp.text();
+          throw new Error(`Server error ${resp.status}: ${txt}`);
+        }
+
+        setProgress(40);
+        const data = await resp.json();
+        setProgress(70);
+
+        eventsCount.textContent = data.events_count ?? 0;
+        preview.textContent = `Upload successful. Events found: ${data.events_count}\n\nYou can download JSON/CSV from the links on the right.`;
+        setProgress(90);
+
+        downloadLinks.innerHTML = '';
+        if(data.links && data.links.json){
+          const jbtn = document.createElement('div');
+          jbtn.className = 'link-btn';
+          jbtn.innerHTML = `<span>Download JSON</span><a href="${data.links.json}" target="_blank">Open</a>`;
+          downloadLinks.appendChild(jbtn);
+
+          try{
+            const jresp = await fetch(data.links.json);
+            if(jresp.ok){
+              const json = await jresp.json();
+              const raw = json.raw_text ?? "";
+              preview.textContent = raw.slice(0, 5000) || " (no raw_text in JSON) ";
+              const events = json.events ?? [];
+              renderEvents(events);
+            }
+          }catch(e){ console.warn('Could not fetch JSON preview', e); }
+        }
+        if(data.links && data.links.csv){
+          const cbtn = document.createElement('div');
+          cbtn.className = 'link-btn';
+          cbtn.innerHTML = `<span>Download CSV</span><a href="${data.links.csv}" target="_blank">Open</a>`;
+          downloadLinks.appendChild(cbtn);
+        }
+
+        setProgress(100);
+        setStatus('idle');
+      }catch(err){
+        console.error(err);
+        preview.textContent = `Error: ${err.message || err}`;
+        downloadLinks.innerHTML = `<div style="color:var(--danger)">Processing failed.</div>`;
+        setStatus('idle');
+        setProgress(0);
+      } finally {
+        uploadBtn.disabled = false;
+      }
+    });
+
+    // Quick backend health check
+    (async function health(){
+      try{
+        const r = await fetch(BACKEND_HEALTH, {method:'GET'});
+        setStatus('idle');
+      }catch(e){
+        setStatus('idle');
+        console.warn('Backend not reachable at', BACKEND_HEALTH);
+      }
+    })();
+
+    resetUI();
+  </script>
+</body>
+</html>
