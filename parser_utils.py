@@ -1,7 +1,7 @@
 import re
 import pandas as pd
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime
+from typing import List, Dict, Any, Optional
 import docx
 import fitz
 try:
@@ -78,20 +78,20 @@ def extract_document_metadata(text: str) -> Dict[str, str]:
     """Extract metadata from SoF text."""
     metadata = {}
     
-    # Vessel name
-    vessel_match = re.search(r"2\.\s*Vessel Name\s*[:\-]?\s*([^\n]+)", text, re.IGNORECASE)
+    # Vessel name - more specific pattern
+    vessel_match = re.search(r"2\.\s*Vessel\s*Name\s*[:\-]?\s*([A-Za-z0-9\s]+?)(?=\d|\.|\n|$)", text, re.IGNORECASE)
     if not vessel_match:
-        vessel_match = re.search(r"Vessel Name\s*[:\-]?\s*([^\n]+)", text, re.IGNORECASE)
+        vessel_match = re.search(r"Vessel\s*Name\s*[:\-]?\s*([A-Za-z0-9\s]+?)(?=\d|\.|\n|$)", text, re.IGNORECASE)
     if vessel_match:
         metadata["vessel"] = vessel_match.group(1).strip()
     
     # Port of Loading (POL)
-    pol_match = re.search(r"3\.\s*Port\s*[:\-]?\s*POL\s*([^\n\-]+)", text, re.IGNORECASE)
+    pol_match = re.search(r"3\.\s*Port\s*[:\-]?\s*POL\s*([A-Za-z\s\-]+?)(?=\d|\.|\n|$)", text, re.IGNORECASE)
     if pol_match:
         metadata["voyage_from"] = pol_match.group(1).strip()
     
     # Port of Discharge (POD)
-    pod_match = re.search(r"6\.\s*Port\s*[:\-]?\s*POD\s*([^\n\-]+)", text, re.IGNORECASE)
+    pod_match = re.search(r"6\.\s*Port\s*[:\-]?\s*POD\s*([A-Za-z\s\-]+?)(?=\d|\.|\n|$)", text, re.IGNORECASE)
     if pod_match:
         metadata["voyage_to"] = pod_match.group(1).strip()
     
@@ -107,18 +107,21 @@ def parse_date_time(date_str: str, time_str: str, year: int) -> Optional[datetim
         }
         
         # Clean date string
-        date_str = re.sub(r'(st|nd|rd|th)', '', date_str.upper())
+        date_str = re.sub(r'(st|nd|rd|th)', '', date_str.upper()).strip()
+        
+        # Extract day and month
+        day_match = re.search(r'(\d{1,2})', date_str)
+        if not day_match:
+            return None
+            
+        day = int(day_match.group(1))
         month = None
         
         # Find month in date string
         for month_name, month_num in month_map.items():
             if month_name in date_str:
                 month = month_num
-                # Extract day number
-                day_match = re.search(r'(\d{1,2})', date_str)
-                if day_match:
-                    day = int(day_match.group(1))
-                    break
+                break
         
         if month is None:
             return None
@@ -127,13 +130,20 @@ def parse_date_time(date_str: str, time_str: str, year: int) -> Optional[datetim
         if time_str:
             time_str = time_str.replace('@', '').strip()
             if ':' in time_str:
-                hours, minutes = map(int, time_str.split(':'))
+                try:
+                    hours, minutes = map(int, time_str.split(':'))
+                except ValueError:
+                    return None
             else:
                 # Handle times like "0700" instead of "07:00"
-                if len(time_str) == 4:
+                if len(time_str) == 4 and time_str.isdigit():
                     hours, minutes = int(time_str[:2]), int(time_str[2:])
                 else:
                     return None
+            
+            # Validate time values
+            if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+                return None
         else:
             hours, minutes = 0, 0
         
@@ -143,7 +153,7 @@ def parse_date_time(date_str: str, time_str: str, year: int) -> Optional[datetim
         return None
 
 def extract_events_enhanced(text: str) -> List[Dict[str, str]]:
-    """Extract events from SoF text with proper date-time handling."""
+    """Extract events from SoF text by focusing on numbered events."""
     events = []
     
     # Extract year from text
@@ -153,108 +163,138 @@ def extract_events_enhanced(text: str) -> List[Dict[str, str]]:
     # Define event patterns with their corresponding search patterns
     event_patterns = [
         # Loading events
-        (r'loading commenced', 'LOADING COMMENCED'),
-        (r'loading completed', 'LOADING COMPLETED'),
-        (r'load.*commence', 'LOADING COMMENCED'),
-        (r'load.*complete', 'LOADING COMPLETED'),
+        (r'loading\s+commenced', 'LOADING COMMENCED'),
+        (r'loading\s+completed', 'LOADING COMPLETED'),
         
         # Discharging events
-        (r'discharging commenced', 'DISCHARGING COMMENCED'),
-        (r'discharging completed', 'DISCHARGING COMPLETED'),
-        (r'discharge.*commence', 'DISCHARGING COMMENCED'),
-        (r'discharge.*complete', 'DISCHARGING COMPLETED'),
+        (r'discharging\s+commenced', 'DISCHARGING COMMENCED'),
+        (r'discharging\s+completed', 'DISCHARGING COMPLETED'),
         
         # Vessel movement events
-        (r'vessel sailed', 'VESSEL SAILED'),
-        (r'vessel arrived', 'VESSEL ARRIVED'),
-        (r'vessel anchor', 'VESSEL ANCHORED'),
-        (r'vessel.*sail', 'VESSEL SAILED'),
-        (r'vessel.*arrive', 'VESSEL ARRIVED'),
+        (r'vessel\s+sailed', 'VESSEL SAILED'),
+        (r'vessel\s+arrived', 'VESSEL ARRIVED'),
+        (r'vessel\s+anchor', 'VESSEL ANCHORED'),
         
         # Port operations
+        (r'\bberth\b', 'BERTHED'),
+        (r'\bquarantine\b', 'QUARANTINE'),
+        (r'\bimmigration\b', 'IMMIGRATION'),
+        (r'notice\s+of\s+readiness', 'NOTICE OF READINESS'),
+        (r'cargo\s+document', 'CARGO DOCUMENT ON BOARD'),
+    ]
+    
+    # Focus on numbered events in the SoF format
+    numbered_events = [
+        (6, 'loading commenced'),
+        (7, 'loading completed'),
+        (9, 'discharging commenced'),
+        (10, 'discharging completed'),
+        (11, 'cargo document on board'),
+        (12, 'vessel sailed'),
+    ]
+    
+    # Pattern to extract numbered events with dates and times
+    event_pattern = r'(\d+)\.\s*([A-Za-z\s]+)[:\-]?\s*(\d{1,2}(?:st|nd|rd|th)?\s*(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[a-z]*)\s*@?\s*(\d{1,2}:\d{2}|\d{3,4})?'
+    
+    matches = list(re.finditer(event_pattern, text, re.IGNORECASE))
+    for match in matches:
+        event_number = int(match.group(1))
+        event_text = match.group(2).strip().lower()
+        date_str = match.group(3).strip() if match.group(3) else ""
+        time_str = match.group(4).strip() if match.group(4) else ""
+        
+        # Determine event type based on text
+        event_type = "UNKNOWN EVENT"
+        for pattern, pattern_event_type in event_patterns:
+            if re.search(pattern, event_text, re.IGNORECASE):
+                event_type = pattern_event_type
+                break
+        
+        # Parse date and time if available
+        event_datetime = None
+        if date_str and time_str:
+            event_datetime = parse_date_time(date_str, time_str, current_year)
+        
+        # Add the event
+        events.append({
+            "event": event_type,
+            "start": event_datetime.isoformat() if event_datetime else "",
+            "end": event_datetime.isoformat() if event_datetime else "",
+            "remarks": f"{event_number}. {event_text}"
+        })
+    
+    # Also extract non-numbered events that are important
+    non_numbered_events = [
+        (r'vessel\s+arrive', 'VESSEL ARRIVED'),
+        (r'vessel\s+anchor', 'VESSEL ANCHORED'),
         (r'berth', 'BERTHED'),
         (r'quarantine', 'QUARANTINE'),
         (r'immigration', 'IMMIGRATION'),
-        (r'notice of readiness', 'NOTICE OF READINESS'),
-        (r'cargo document', 'CARGO DOCUMENT ON BOARD'),
-        (r'document.*board', 'CARGO DOCUMENT ON BOARD'),
+        (r'notice\s+of\s+readiness', 'NOTICE OF READINESS'),
     ]
     
-    # First, find all date patterns in the text
-    date_pattern = r'(\d{1,2}(?:st|nd|rd|th)?\s*(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Za-z]*)'
-    time_pattern = r'(@?\s*\d{1,2}:\d{2}|@?\s*\d{3,4})'
+    # Pattern to find dates and times
+    date_pattern = r'(\d{1,2}(?:st|nd|rd|th)?)\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)'
+    time_pattern = r'(@?\s*(\d{1,2}:\d{2}|\d{3,4}))'
     
-    # Find all date-time combinations
-    date_time_matches = re.finditer(fr'{date_pattern}\s*{time_pattern}', text, re.IGNORECASE)
-
+    # Find all date-time patterns in the text
+    date_time_matches = list(re.finditer(f'{date_pattern}\\s*{time_pattern}', text, re.IGNORECASE))
     
     for match in date_time_matches:
-        date_str = match.group(1).strip()
-        time_str = match.group(2).replace('@', '').strip()
+        date_str = f"{match.group(1)} {match.group(2)}"
+        time_str = match.group(4)
         
         # Parse the date and time
         event_datetime = parse_date_time(date_str, time_str, current_year)
         if not event_datetime:
             continue
         
-        # Get the context around this date-time (50 characters before and after)
-        start_idx = max(0, match.start() - 50)
-        end_idx = min(len(text), match.end() + 50)
-        context = text[start_idx:end_idx]
+        # Get context around this date-time
+        context_start = max(0, match.start() - 50)
+        context_end = min(len(text), match.end() + 50)
+        context = text[context_start:context_end]
         
         # Determine what event this date-time is associated with
         event_type = "UNKNOWN EVENT"
-        for pattern, event_name in event_patterns:
+        for pattern, pattern_event_type in non_numbered_events:
             if re.search(pattern, context, re.IGNORECASE):
-                event_type = event_name
+                event_type = pattern_event_type
                 break
         
-        events.append({
-            "event": event_type,
-            "start": event_datetime.isoformat(),
-            "end": event_datetime.isoformat(),
-            "remarks": context.strip()
-        })
+        # Add the event if it's not unknown
+        if event_type != "UNKNOWN EVENT":
+            events.append({
+                "event": event_type,
+                "start": event_datetime.isoformat(),
+                "end": event_datetime.isoformat(),
+                "remarks": context.strip()
+            })
     
-    # Also look for specific event patterns that might not have been captured
-    for pattern, event_name in event_patterns:
-        event_matches = re.finditer(pattern, text, re.IGNORECASE)
-        for match in event_matches:
-            # Check if this event is already captured
-            context = text[max(0, match.start()-30):min(len(text), match.end()+30)]
-            already_captured = any(
-                event_name == e["event"] and context in e["remarks"] 
-                for e in events
-            )
-            
-            if not already_captured:
-                # Try to find a date near this event
-                date_nearby = re.search(
-                    fr'{date_pattern}\s*{time_pattern}',
-                    text[max(0, match.start()-100):min(len(text), match.end()+100)],
-                    re.IGNORECASE
-                )
-                
-                if date_nearby:
-                    date_str = date_nearby.group(1).strip()
-                    time_str = date_nearby.group(2).replace('@', '').strip()
-                    event_datetime = parse_date_time(date_str, time_str, current_year)
-                    
-                    events.append({
-                        "event": event_name,
-                        "start": event_datetime.isoformat() if event_datetime else "",
-                        "end": event_datetime.isoformat() if event_datetime else "",
-                        "remarks": context.strip()
-                    })
-                else:
-                    events.append({
-                        "event": event_name,
-                        "start": "",
-                        "end": "",
-                        "remarks": context.strip()
-                    })
+    # Remove duplicates by event type and timestamp
+    unique_events = []
+    seen_events = set()
     
-    return events
+    for event in events:
+        event_key = f"{event['event']}_{event['start']}"
+        if event_key not in seen_events:
+            unique_events.append(event)
+            seen_events.add(event_key)
+    
+    # Filter out UNKNOWN events
+    unique_events = [event for event in unique_events if event['event'] != 'UNKNOWN EVENT']
+    
+    # Sort events by datetime
+    def get_sort_key(event):
+        if event["start"]:
+            try:
+                return datetime.fromisoformat(event["start"])
+            except:
+                return datetime.max
+        return datetime.max
+    
+    unique_events.sort(key=get_sort_key)
+    
+    return unique_events
 
 # For backward compatibility
 def extract_events(text: str) -> List[Dict[str, str]]:
